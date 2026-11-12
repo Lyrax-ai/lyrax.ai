@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: lyrax_test
+          POSTGRES_USER: lyrax_user
+          POSTGRES_PASSWORD: lyrax_test_pass
+        ports: [5432:5432]
+        options: >-
+          --health-cmd="pg_isready -U lyrax_user -d lyrax_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+
+      - name: Run tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://lyrax_user:lyrax_test_pass@localhost:5432/lyrax_test
+        run: |
+          pytest

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lyrax"
+version = "0.1.0"
+description = "AI-agent discovery, verification, and orchestration platform - Phase 0 Backend"
+authors = [{name = "Lyrax Team"}]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.27.0",
+    "pydantic>=2.5.0",
+    "sqlalchemy>=2.0.23",
+    "asyncpg>=0.29.0",
+    "httpx>=0.25.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.25.0"
+]
+
+[tool.setuptools]
+packages = ["api", "agents", "evaluators", "reports", "runners", "schemas", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
