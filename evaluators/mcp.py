@@ -142,6 +142,13 @@ def _validate_rpc_response(
                     "Server returned a structurally valid JSON-RPC error."
                 )
             )
+            checks.append(
+                _check(
+                    "rpc_operation",
+                    "FAIL",
+                    "The requested MCP operation failed with a JSON-RPC error."
+                )
+            )
 
         return checks, None
 
