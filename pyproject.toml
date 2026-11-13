@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lyrax"
-version = "0.1.0"
-description = "AI-agent discovery, verification, and orchestration platform - Phase 0 Backend"
+version = "0.2.0"
+description = "AI-agent discovery, verification, and orchestration platform"
 authors = [{name = "Lyrax Team"}]
 requires-python = ">=3.12"
 dependencies = [
@@ -14,8 +14,13 @@ dependencies = [
     "pydantic>=2.5.0",
     "sqlalchemy>=2.0.23",
     "asyncpg>=0.29.0",
-    "httpx>=0.25.0"
+    "httpx>=0.25.0",
+    "alembic>=1.13.0",
+    "PyYAML>=6.0"
 ]
+
+[project.scripts]
+lyrax = "cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -26,6 +31,7 @@ dev = [
 
 [tool.setuptools]
 packages = ["api", "agents", "evaluators", "reports", "runners", "schemas", "tests"]
+py-modules = ["main", "database", "cli"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

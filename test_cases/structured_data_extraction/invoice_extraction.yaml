@@ -1,0 +1,15 @@
+id: extraction-001
+name: Extract invoice details
+capability: structured_data_extraction
+
+input:
+  document: "Invoice 1042. Customer: Acme Ltd. Total: 250.00 USD."
+
+expected_output:
+  invoice_number: "1042"
+  customer: "Acme Ltd."
+  total: 250.00
+  currency: "USD"
+
+tolerance:
+  mode: exact

@@ -1,0 +1,33 @@
+{
+  "name": "Example Research Agent",
+  "description": "An example agent for testing A2A compliance.",
+  "supportedInterfaces": [
+    {
+      "url": "https://example.com/a2a",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "version": "1.0.0",
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false
+  },
+  "defaultInputModes": [
+    "text/plain"
+  ],
+  "defaultOutputModes": [
+    "text/plain"
+  ],
+  "skills": [
+    {
+      "id": "research",
+      "name": "Web Research",
+      "description": "Performs web research.",
+      "tags": [
+        "research",
+        "web"
+      ]
+    }
+  ]
+}

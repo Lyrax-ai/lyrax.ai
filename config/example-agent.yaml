@@ -1,0 +1,17 @@
+name: Example Research Agent
+provider: Example Provider
+marketplace: Lyrax
+endpoint: https://example.com/agent
+version: "1.0"
+auth_type: none
+
+profile:
+  claimed_capabilities:
+    - web_research
+    - summarization
+  protocols:
+    - A2A
+  input_types:
+    - text
+  output_types:
+    - text
