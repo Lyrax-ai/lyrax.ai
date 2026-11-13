@@ -9,3 +9,22 @@ venv/
 
 # Environment variables
 .env
+
+# Local databases and backups
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python generated files
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
