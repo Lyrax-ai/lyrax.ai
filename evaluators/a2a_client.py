@@ -7,6 +7,7 @@ from evaluators.a2a import (
     validate_send_message_response,
     validate_get_task_response,
 )
+from evaluators.endpoint_security import validate_endpoint
 
 
 A2A_HEADERS = {
@@ -18,26 +19,27 @@ A2A_HEADERS = {
 async def fetch_agent_card(
     client: httpx.AsyncClient,
     card_url: str,
+    allow_private_network: bool = False,
 ) -> dict:
-
     evidence = {
         "operation": "fetch_agent_card",
         "url": card_url,
     }
 
     try:
-        response = await client.get(card_url)
+        validated = validate_endpoint(
+            card_url,
+            allow_private_network=allow_private_network,
+        )
 
+        response = await client.get(validated.url)
         evidence["http_status"] = response.status_code
-
         response.raise_for_status()
 
         card = response.json()
 
         if not isinstance(card, dict):
-            raise ValueError(
-                "Agent Card response must be a JSON object."
-            )
+            raise ValueError("Agent Card response must be a JSON object.")
 
         validation = validate_agent_card(card)
 
@@ -62,8 +64,8 @@ async def send_message(
     client: httpx.AsyncClient,
     endpoint: str,
     message_text: str,
+    allow_private_network: bool = False,
 ) -> dict:
-
     request_id = str(uuid.uuid4())
 
     payload = {
@@ -74,24 +76,24 @@ async def send_message(
             "message": {
                 "messageId": str(uuid.uuid4()),
                 "role": "ROLE_USER",
-                "parts": [
-                    {
-                        "text": message_text
-                    }
-                ],
+                "parts": [{"text": message_text}],
             }
         },
     }
 
     try:
-        response = await client.post(
+        validated = validate_endpoint(
             endpoint,
+            allow_private_network=allow_private_network,
+        )
+
+        response = await client.post(
+            validated.url,
             json=payload,
             headers=A2A_HEADERS,
         )
 
         response.raise_for_status()
-
         result = response.json()
 
         validation = validate_send_message_response(
@@ -118,8 +120,8 @@ async def get_task(
     endpoint: str,
     task_id: str,
     history_length: int | None = None,
+    allow_private_network: bool = False,
 ) -> dict:
-
     if not task_id:
         raise ValueError("Task ID cannot be empty.")
 
@@ -132,9 +134,7 @@ async def get_task(
 
     request_id = str(uuid.uuid4())
 
-    params = {
-        "id": task_id,
-    }
+    params = {"id": task_id}
 
     if history_length is not None:
         params["historyLength"] = history_length
@@ -147,14 +147,18 @@ async def get_task(
     }
 
     try:
-        response = await client.post(
+        validated = validate_endpoint(
             endpoint,
+            allow_private_network=allow_private_network,
+        )
+
+        response = await client.post(
+            validated.url,
             json=payload,
             headers=A2A_HEADERS,
         )
 
         response.raise_for_status()
-
         result = response.json()
 
         validation = validate_get_task_response(
