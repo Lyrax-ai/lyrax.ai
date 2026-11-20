@@ -1,4 +1,4 @@
-from typing import Any, Literal
+﻿from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -26,6 +26,8 @@ class TestCase(BaseModel):
 
     input: Any
     expected_output: Any
+
+    tool_name: str | None = None
 
     tolerance: ToleranceRule = Field(
         default_factory=ToleranceRule

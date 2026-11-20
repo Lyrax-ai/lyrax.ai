@@ -9,9 +9,15 @@ from evaluators.a2a_client import fetch_agent_card
 from evaluators.endpoint_security import validate_endpoint
 from evaluators.pinned_transport import create_pinned_async_transport
 from evaluators.mcp_client import MCPClient, MCPClientError
+from evaluators.test_case_loader import load_test_case
+from evaluators.capability_execution import (
+    execute_a2a_test_cases,
+    execute_mcp_test_cases,
+)
 
 
 REPORTS_DIR = Path("reports")
+TEST_CASES_DIR = Path("test_cases")
 
 
 def determine_status(checks):
@@ -35,24 +41,50 @@ def determine_status(checks):
     return "PASS"
 
 
-def build_evaluation_report(agent, protocol_results):
-    protocols = dict(protocol_results)
-
+def _combined_status(results):
     statuses = [
         result.get("status", "NOT_RUN")
-        for result in protocols.values()
+        for result in results
     ]
 
     if "FAIL" in statuses:
-        overall_status = "FAIL"
-    elif "UNSUPPORTED" in statuses:
-        overall_status = "UNSUPPORTED"
-    elif "NOT_RUN" in statuses:
-        overall_status = "NOT_RUN"
-    elif statuses and all(status == "PASS" for status in statuses):
-        overall_status = "PASS"
-    else:
-        overall_status = "NOT_RUN"
+        return "FAIL"
+
+    if "UNSUPPORTED" in statuses:
+        return "UNSUPPORTED"
+
+    if "NOT_RUN" in statuses:
+        return "NOT_RUN"
+
+    if statuses and all(status == "PASS" for status in statuses):
+        return "PASS"
+
+    return "NOT_RUN"
+
+
+def build_evaluation_report(
+    agent,
+    protocol_results,
+    capability_results=None,
+):
+    protocols = dict(protocol_results)
+    capabilities = capability_results or {}
+
+    protocol_status = _combined_status(list(protocols.values()))
+
+    capability_statuses = [
+        result.get("status", "NOT_RUN")
+        for result in capabilities.values()
+    ]
+
+    # Preserve protocol status unless capability execution finds
+    # an actual failure. NOT_RUN capability checks do not invalidate
+    # a successful protocol-compliance evaluation.
+    overall_status = (
+        "FAIL"
+        if "FAIL" in capability_statuses
+        else protocol_status
+    )
 
     return {
         "evaluation_id": (
@@ -65,20 +97,70 @@ def build_evaluation_report(agent, protocol_results):
             "provider": agent.provider,
             "endpoint": agent.endpoint,
             "version": agent.version,
+            "claimed_capabilities": (
+                agent.profile.claimed_capabilities
+                if agent.profile else []
+            ),
         },
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
         "evaluation_type": "protocol_compliance",
         "status": overall_status,
         "protocols": protocols,
+        "capabilities": capabilities,
         "limitations": [
             "Protocol compliance does not establish task accuracy.",
-            "Capability and reliability evaluations are separate.",
+            "Capability scores only cover available matching test cases.",
+            "A capability without a matching test case is not verified.",
             "Only protocols declared in the agent profile are evaluated.",
         ],
     }
 
 
-async def evaluate_a2a(endpoint):
+def load_agent_test_cases(claimed_capabilities):
+    if not TEST_CASES_DIR.is_dir():
+        return [], {
+            "status": "NOT_RUN",
+            "reason": "The test_cases directory does not exist.",
+        }
+
+    cases = []
+    errors = []
+
+    normalized_claims = {
+        capability.strip().lower()
+        for capability in claimed_capabilities
+        if isinstance(capability, str)
+    }
+
+    for path in sorted(TEST_CASES_DIR.rglob("*.yaml")):
+        try:
+            test_case = load_test_case(path)
+
+            if test_case.capability.strip().lower() in normalized_claims:
+                cases.append(test_case)
+
+        except Exception as error:
+            errors.append({
+                "file": str(path),
+                "error": str(error),
+            })
+
+    if not cases:
+        return [], {
+            "status": "NOT_RUN",
+            "reason": "No test cases matched the agent's claimed capabilities.",
+            "claimed_capabilities": sorted(normalized_claims),
+            "loader_errors": errors,
+        }
+
+    return cases, {
+        "status": "PASS",
+        "loaded": len(cases),
+        "loader_errors": errors,
+    }
+
+
+async def evaluate_a2a(endpoint, test_cases=None):
     evidence = {
         "protocol": "A2A",
         "operation": "agent_card_validation",
@@ -89,7 +171,6 @@ async def evaluate_a2a(endpoint):
 
     try:
         validated = validate_endpoint(endpoint)
-
         transport = create_pinned_async_transport(validated)
 
         async with httpx.AsyncClient(
@@ -104,7 +185,19 @@ async def evaluate_a2a(endpoint):
                 allow_private_network=False,
             )
 
-        evidence.update(result)
+            evidence.update(result)
+
+            if result.get("status") != "PASS":
+                return evidence
+
+            if test_cases:
+                evidence["capability_execution"] = (
+                    await execute_a2a_test_cases(
+                        client,
+                        validated.url,
+                        test_cases,
+                    )
+                )
 
     except Exception as error:
         evidence.update({
@@ -115,7 +208,29 @@ async def evaluate_a2a(endpoint):
     return evidence
 
 
-def evaluate_mcp(endpoint):
+def _extract_mcp_tool_definitions(tools_result):
+    evidence = tools_result.get("evidence") or {}
+    response = evidence.get("response") or {}
+
+    result = response.get("result", response)
+
+    if not isinstance(result, dict):
+        return {}
+
+    tools = result.get("tools", [])
+
+    if not isinstance(tools, list):
+        return {}
+
+    return {
+        item["name"]: item
+        for item in tools
+        if isinstance(item, dict)
+        and isinstance(item.get("name"), str)
+    }
+
+
+def evaluate_mcp(endpoint, test_cases=None):
     evidence = {
         "protocol": "MCP",
         "operations": {},
@@ -134,11 +249,22 @@ def evaluate_mcp(endpoint):
         tools = client.list_tools()
         evidence["operations"]["tools_list"] = tools
 
-        evidence["status"] = (
-            "PASS"
-            if tools["status"] == "PASS"
-            else tools["status"]
-        )
+        if tools["status"] != "PASS":
+            evidence["status"] = tools["status"]
+            return evidence
+
+        evidence["status"] = "PASS"
+
+        if test_cases:
+            definitions = _extract_mcp_tool_definitions(tools)
+
+            evidence["capability_execution"] = (
+                execute_mcp_test_cases(
+                    client,
+                    test_cases,
+                    tool_definitions=definitions,
+                )
+            )
 
     except (MCPClientError, ValueError) as error:
         evidence["status"] = "FAIL"
@@ -172,7 +298,16 @@ async def evaluate_agent(db, agent_id):
         if isinstance(protocol, str)
     }
 
+    claimed_capabilities = (
+        agent.profile.claimed_capabilities or []
+    )
+
+    test_cases, test_case_loading = load_agent_test_cases(
+        claimed_capabilities
+    )
+
     protocol_results = {}
+    capability_results = {}
 
     if not declared_protocols:
         protocol_results["registry"] = {
@@ -187,16 +322,41 @@ async def evaluate_agent(db, agent_id):
                 "reason": "Agent has no registered endpoint.",
             }
 
+        capability_results["test_case_loading"] = {
+            "status": "NOT_RUN",
+            "reason": "Agent has no registered endpoint.",
+        }
+
     else:
         if "A2A" in declared_protocols:
-            protocol_results["A2A"] = await evaluate_a2a(
-                agent.endpoint
-            )
+            import inspect
+
+            a2a_parameters = inspect.signature(evaluate_a2a).parameters
+
+            if len(a2a_parameters) >= 2:
+                protocol_results["A2A"] = await evaluate_a2a(
+                    agent.endpoint,
+                    test_cases,
+                )
+            else:
+                protocol_results["A2A"] = await evaluate_a2a(
+                    agent.endpoint
+                )
 
         if "MCP" in declared_protocols:
-            protocol_results["MCP"] = evaluate_mcp(
-                agent.endpoint
-            )
+            import inspect
+
+            mcp_parameters = inspect.signature(evaluate_mcp).parameters
+
+            if len(mcp_parameters) >= 2:
+                protocol_results["MCP"] = evaluate_mcp(
+                    agent.endpoint,
+                    test_cases,
+                )
+            else:
+                protocol_results["MCP"] = evaluate_mcp(
+                    agent.endpoint
+                )
 
         for protocol in declared_protocols - {"A2A", "MCP"}:
             protocol_results[protocol] = {
@@ -206,9 +366,37 @@ async def evaluate_agent(db, agent_id):
                 ),
             }
 
+        capability_results["test_case_loading"] = test_case_loading
+
+        if not test_cases:
+            capability_results["execution"] = {
+                "status": "NOT_RUN",
+                "reason": test_case_loading["reason"],
+            }
+
+        else:
+            for protocol in declared_protocols:
+                if protocol not in {"A2A", "MCP"}:
+                    continue
+
+                protocol_result = protocol_results.get(protocol, {})
+
+                execution = protocol_result.get(
+                    "capability_execution"
+                )
+
+                capability_results[protocol] = execution or {
+                    "status": "NOT_RUN",
+                    "reason": (
+                        "Capability execution was unavailable because "
+                        "protocol validation did not complete."
+                    ),
+                }
+
     report = build_evaluation_report(
         agent,
         protocol_results,
+        capability_results,
     )
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -243,6 +431,38 @@ async def evaluate_agent(db, agent_id):
             f"Status: {result.get('status', 'NOT_RUN')}",
             "",
         ])
+
+    lines.extend([
+        "## Capability Results",
+        "",
+    ])
+
+    for capability, result in capability_results.items():
+        lines.extend([
+            f"### {capability}",
+            "",
+            f"Status: {result.get('status', 'NOT_RUN')}",
+            "",
+        ])
+
+        if "accuracy" in result:
+            lines.append(f"Accuracy: {result['accuracy']}%")
+            lines.append("")
+
+        if "test_cases" in result:
+            lines.extend([
+                "| Test case | Capability | Status |",
+                "|---|---|---|",
+            ])
+
+            for case in result["test_cases"]:
+                lines.append(
+                    f"| {case.get('test_case_id')} "
+                    f"| {case.get('capability')} "
+                    f"| {case.get('status')} |"
+                )
+
+            lines.append("")
 
     lines.extend([
         "## Limitations",
