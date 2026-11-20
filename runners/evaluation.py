@@ -6,6 +6,8 @@ from pathlib import Path
 import httpx
 
 from evaluators.a2a_client import fetch_agent_card
+from evaluators.endpoint_security import validate_endpoint
+from evaluators.pinned_transport import create_pinned_async_transport
 from evaluators.mcp_client import MCPClient, MCPClientError
 
 
@@ -13,6 +15,9 @@ REPORTS_DIR = Path("reports")
 
 
 def determine_status(checks):
+    if not checks:
+        return "NOT_RUN"
+
     statuses = {
         item.get("status", "NOT_RUN")
         for item in checks
@@ -31,10 +36,7 @@ def determine_status(checks):
 
 
 def build_evaluation_report(agent, protocol_results):
-    protocols = {}
-
-    for protocol, result in protocol_results.items():
-        protocols[protocol] = result
+    protocols = dict(protocol_results)
 
     statuses = [
         result.get("status", "NOT_RUN")
@@ -83,12 +85,24 @@ async def evaluate_a2a(endpoint):
         "status": "NOT_RUN",
     }
 
+    transport = None
+
     try:
+        validated = validate_endpoint(endpoint)
+
+        transport = create_pinned_async_transport(validated)
+
         async with httpx.AsyncClient(
+            transport=transport,
             timeout=15.0,
             follow_redirects=False,
+            trust_env=False,
         ) as client:
-            result = await fetch_agent_card(client, endpoint)
+            result = await fetch_agent_card(
+                client,
+                validated.url,
+                allow_private_network=False,
+            )
 
         evidence.update(result)
 
@@ -211,7 +225,7 @@ async def evaluate_agent(db, agent_id):
     markdown_path = report_path.with_suffix(".md")
 
     lines = [
-        f"# Lyrax Evaluation Report",
+        "# Lyrax Evaluation Report",
         "",
         f"Agent: {agent.name}",
         f"Provider: {agent.provider}",

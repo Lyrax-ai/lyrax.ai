@@ -1,8 +1,5 @@
 ﻿import itertools
-import ipaddress
 import json
-import socket
-from urllib.parse import urlparse
 
 import httpx
 
@@ -12,6 +9,11 @@ from evaluators.mcp import (
     validate_tools_list_response,
     validate_tool_call_response,
 )
+from evaluators.endpoint_security import (
+    EndpointSecurityError,
+    validate_endpoint,
+)
+from evaluators.pinned_transport import create_pinned_sync_transport
 
 
 class MCPClientError(Exception):
@@ -39,46 +41,13 @@ class MCPClient:
         self.transport = transport
         self._request_ids = itertools.count(1)
 
-        self._validate_endpoint()
-
-    def _validate_endpoint(self):
-        parsed = urlparse(self.endpoint)
-
-        if parsed.scheme not in {"http", "https"}:
-            raise MCPClientError("Endpoint must use HTTP or HTTPS.")
-
-        if not parsed.hostname:
-            raise MCPClientError("Endpoint must contain a hostname.")
-
-        if parsed.username or parsed.password:
-            raise MCPClientError(
-                "Credentials must not be embedded in endpoint URLs."
-            )
-
-        if parsed.fragment:
-            raise MCPClientError("Endpoint URLs must not contain fragments.")
-
-        if self.allow_private_network:
-            return
-
         try:
-            addresses = socket.getaddrinfo(
-                parsed.hostname,
-                parsed.port or (443 if parsed.scheme == "https" else 80),
-                type=socket.SOCK_STREAM,
+            self.validated_endpoint = validate_endpoint(
+                endpoint,
+                allow_private_network=allow_private_network,
             )
-        except socket.gaierror as exc:
-            raise MCPClientError(
-                f"Could not resolve endpoint hostname: {exc}"
-            ) from exc
-
-        for address in addresses:
-            ip = ipaddress.ip_address(address[4][0])
-
-            if not ip.is_global:
-                raise MCPClientError(
-                    "Endpoint resolves to a non-public IP address."
-                )
+        except EndpointSecurityError as exc:
+            raise MCPClientError(str(exc)) from exc
 
     def _metadata(self):
         return {
@@ -91,7 +60,6 @@ class MCPClient:
         }
 
     def _request(self, method, params=None, tool_name=None):
-
         request_id = next(self._request_ids)
 
         payload = {
@@ -114,16 +82,25 @@ class MCPClient:
         if tool_name is not None:
             headers["Mcp-Name"] = tool_name
 
+        # A fresh pinned transport is created for each real request.
+        # Injected transports remain available for deterministic tests.
+        transport = (
+            self.transport
+            if self.transport is not None
+            else create_pinned_sync_transport(self.validated_endpoint)
+        )
+
         try:
             with httpx.Client(
                 timeout=self.timeout,
-                transport=self.transport,
+                transport=transport,
                 follow_redirects=False,
+                trust_env=False,
             ) as client:
 
                 with client.stream(
                     "POST",
-                    self.endpoint,
+                    self.validated_endpoint.url,
                     json=payload,
                     headers=headers,
                 ) as response:
@@ -162,12 +139,10 @@ class MCPClient:
 
     def discover(self):
         request_id, response = self._request("server/discover")
-
         return validate_discover_response(response, request_id)
 
     def list_tools(self):
         request_id, response = self._request("tools/list")
-
         return validate_tools_list_response(response, request_id)
 
     def call_tool(

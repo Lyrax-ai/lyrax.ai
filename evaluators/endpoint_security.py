@@ -26,7 +26,9 @@ def validate_endpoint(
         raise EndpointSecurityError("Endpoint must be a non-empty string.")
 
     if endpoint != endpoint.strip():
-        raise EndpointSecurityError("Endpoint cannot contain surrounding whitespace.")
+        raise EndpointSecurityError(
+            "Endpoint cannot contain surrounding whitespace."
+        )
 
     if any(ord(char) < 32 or ord(char) == 127 for char in endpoint):
         raise EndpointSecurityError("Endpoint contains control characters.")
@@ -40,14 +42,20 @@ def validate_endpoint(
     except ValueError as exc:
         raise EndpointSecurityError("Endpoint URL is malformed.") from exc
 
-    if parsed.scheme.lower() not in {"http", "https"}:
-        raise EndpointSecurityError("Only HTTP and HTTPS endpoints are supported.")
+    scheme = parsed.scheme.lower()
+
+    if scheme not in {"http", "https"}:
+        raise EndpointSecurityError(
+            "Only HTTP and HTTPS endpoints are supported."
+        )
 
     if not parsed.hostname:
         raise EndpointSecurityError("Endpoint must contain a hostname.")
 
     if parsed.username is not None or parsed.password is not None:
-        raise EndpointSecurityError("Embedded endpoint credentials are prohibited.")
+        raise EndpointSecurityError(
+            "Embedded endpoint credentials are prohibited."
+        )
 
     if parsed.fragment:
         raise EndpointSecurityError("Endpoint fragments are prohibited.")
@@ -57,22 +65,20 @@ def validate_endpoint(
     if not hostname:
         raise EndpointSecurityError("Endpoint hostname is invalid.")
 
-    effective_port = port or (443 if parsed.scheme.lower() == "https" else 80)
+    effective_port = port or (443 if scheme == "https" else 80)
 
     if not 1 <= effective_port <= 65535:
         raise EndpointSecurityError("Endpoint port is invalid.")
 
-    if allow_private_network:
-        return ValidatedEndpoint(
-            url=endpoint,
-            scheme=parsed.scheme.lower(),
-            hostname=hostname,
-            port=effective_port,
-            resolved_addresses=(),
-        )
+    is_localhost = (
+        hostname == "localhost"
+        or hostname.endswith(".localhost")
+    )
 
-    if hostname == "localhost" or hostname.endswith(".localhost"):
-        raise EndpointSecurityError("Localhost endpoints are prohibited.")
+    if is_localhost and not allow_private_network:
+        raise EndpointSecurityError(
+            "Localhost endpoints are prohibited."
+        )
 
     try:
         literal_ip = ipaddress.ip_address(hostname)
@@ -98,20 +104,34 @@ def validate_endpoint(
             ) from exc
 
     if not addresses:
-        raise EndpointSecurityError("Endpoint hostname resolved to no addresses.")
+        raise EndpointSecurityError(
+            "Endpoint hostname resolved to no addresses."
+        )
+
+    normalized_addresses = set()
 
     for address in addresses:
-        if not address.is_global:
+        # Normalize IPv4-mapped IPv6 addresses before policy checks.
+        if isinstance(address, ipaddress.IPv6Address):
+            if address.ipv4_mapped is not None:
+                address = address.ipv4_mapped
+
+        if address.is_multicast or address.is_unspecified:
+            raise EndpointSecurityError(
+                "Endpoint resolves to an unusable IP address."
+            )
+
+        if not allow_private_network and not address.is_global:
             raise EndpointSecurityError(
                 "Endpoint resolves to a non-public IP address."
             )
 
+        normalized_addresses.add(str(address))
+
     return ValidatedEndpoint(
         url=endpoint,
-        scheme=parsed.scheme.lower(),
+        scheme=scheme,
         hostname=hostname,
         port=effective_port,
-        resolved_addresses=tuple(
-            sorted({str(address) for address in addresses})
-        ),
+        resolved_addresses=tuple(sorted(normalized_addresses)),
     )

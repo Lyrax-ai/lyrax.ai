@@ -311,3 +311,47 @@ def test_agent_message_part_with_multiple_content_fields():
     result = validate_send_message_response(response, "request-1")
 
     assert result["status"] == "FAIL"
+
+
+@pytest.mark.asyncio
+async def test_fetch_agent_card_rejects_unpinned_client():
+    async with httpx.AsyncClient() as client:
+        result = await fetch_agent_card(
+            client,
+            "https://example.com/.well-known/agent-card.json",
+        )
+
+    assert result["status"] == "FAIL"
+    assert "DNS-pinned" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_send_message_rejects_unpinned_client():
+    async with httpx.AsyncClient() as client:
+        result = await send_message(
+            client,
+            "https://example.com/a2a",
+            "Hello",
+        )
+
+    assert result["status"] == "FAIL"
+    assert any(
+        "DNS-pinned" in error
+        for error in result["errors"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_task_rejects_unpinned_client():
+    async with httpx.AsyncClient() as client:
+        result = await get_task(
+            client,
+            "https://example.com/a2a",
+            "task-1",
+        )
+
+    assert result["status"] == "FAIL"
+    assert any(
+        "DNS-pinned" in error
+        for error in result["errors"]
+    )

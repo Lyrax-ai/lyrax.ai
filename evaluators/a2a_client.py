@@ -8,12 +8,46 @@ from evaluators.a2a import (
     validate_get_task_response,
 )
 from evaluators.endpoint_security import validate_endpoint
+from evaluators.pinned_transport import _PinnedAsyncBackend
 
 
 A2A_HEADERS = {
     "Content-Type": "application/json",
     "A2A-Version": "1.0",
 }
+
+
+def _validate_client_transport(client: httpx.AsyncClient) -> None:
+    """
+    Permit only DNS-pinned network transports or isolated MockTransport.
+
+    Reject mounted transports because they can override the main transport
+    for matching hosts.
+    """
+    if client.is_closed:
+        raise ValueError("A2A client is closed.")
+
+    if client._mounts:
+        raise ValueError(
+            "A2A clients with custom transport mounts are not permitted."
+        )
+
+    transport = client._transport
+
+    if isinstance(transport, httpx.MockTransport):
+        return
+
+    if not isinstance(transport, httpx.AsyncHTTPTransport):
+        raise ValueError(
+            "A2A requires a DNS-pinned async transport."
+        )
+
+    backend = transport._pool._network_backend
+
+    if not isinstance(backend, _PinnedAsyncBackend):
+        raise ValueError(
+            "A2A requires a DNS-pinned async transport."
+        )
 
 
 async def fetch_agent_card(
@@ -27,12 +61,17 @@ async def fetch_agent_card(
     }
 
     try:
+        _validate_client_transport(client)
+
         validated = validate_endpoint(
             card_url,
             allow_private_network=allow_private_network,
         )
 
-        response = await client.get(validated.url, follow_redirects=False)
+        response = await client.get(
+            validated.url,
+            follow_redirects=False,
+        )
         evidence["http_status"] = response.status_code
         response.raise_for_status()
 
@@ -82,6 +121,8 @@ async def send_message(
     }
 
     try:
+        _validate_client_transport(client)
+
         validated = validate_endpoint(
             endpoint,
             allow_private_network=allow_private_network,
@@ -148,6 +189,8 @@ async def get_task(
     }
 
     try:
+        _validate_client_transport(client)
+
         validated = validate_endpoint(
             endpoint,
             allow_private_network=allow_private_network,
@@ -182,4 +225,3 @@ async def get_task(
             "task_id": task_id,
             "errors": [str(error)],
         }
-
