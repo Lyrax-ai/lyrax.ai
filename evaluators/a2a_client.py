@@ -32,7 +32,7 @@ async def fetch_agent_card(
             allow_private_network=allow_private_network,
         )
 
-        response = await client.get(validated.url)
+        response = await client.get(validated.url, follow_redirects=False)
         evidence["http_status"] = response.status_code
         response.raise_for_status()
 
@@ -90,6 +90,7 @@ async def send_message(
         response = await client.post(
             validated.url,
             json=payload,
+            follow_redirects=False,
             headers=A2A_HEADERS,
         )
 
@@ -155,6 +156,7 @@ async def get_task(
         response = await client.post(
             validated.url,
             json=payload,
+            follow_redirects=False,
             headers=A2A_HEADERS,
         )
 
@@ -180,3 +182,4 @@ async def get_task(
             "task_id": task_id,
             "errors": [str(error)],
         }
+
