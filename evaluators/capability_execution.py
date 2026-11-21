@@ -1,9 +1,24 @@
-﻿import json
+﻿import asyncio
+import json
 from typing import Any
 
-from evaluators.a2a_client import send_message
+from evaluators.a2a_client import send_message, get_task
 from evaluators.capability import evaluate_capability
-from evaluators.mcp import validate_tool_call_response
+
+
+MAX_TASK_POLLS = 10
+TASK_POLL_INTERVAL = 1.0
+
+RUNNING_STATES = {
+    "TASK_STATE_UNSPECIFIED",
+    "TASK_STATE_SUBMITTED",
+    "TASK_STATE_WORKING",
+}
+
+UNSUPPORTED_STATES = {
+    "TASK_STATE_INPUT_REQUIRED",
+    "TASK_STATE_AUTH_REQUIRED",
+}
 
 
 def _parse_structured_output(value: Any):
@@ -37,44 +52,176 @@ def _extract_parts(parts):
     return None
 
 
-def extract_a2a_output(validation):
-    if validation.get("status") != "PASS":
-        return None, "A2A response validation failed."
+def _extract_completed_task(task):
+    if not isinstance(task, dict):
+        return None, "A2A task response was invalid."
 
-    response = validation.get("response")
-    if not isinstance(response, dict):
-        return None, "A2A response was missing."
+    status = task.get("status")
+    state = status.get("state") if isinstance(status, dict) else None
 
-    result = response.get("result")
-    if not isinstance(result, dict):
-        return None, "A2A result was missing."
+    if state != "TASK_STATE_COMPLETED":
+        return None, f"A2A task did not complete. State: {state}"
 
-    message = result.get("message")
-    if isinstance(message, dict):
-        output = _extract_parts(message.get("parts"))
-        if output is not None:
-            return output, None
+    artifacts = task.get("artifacts", [])
 
-    task = result.get("task")
-    if isinstance(task, dict):
-        state = (task.get("status") or {}).get("state")
-
-        if state != "TASK_STATE_COMPLETED":
-            return None, f"A2A task did not complete. State: {state}"
-
-        for artifact in task.get("artifacts", []):
+    if isinstance(artifacts, list):
+        for artifact in artifacts:
             if isinstance(artifact, dict):
                 output = _extract_parts(artifact.get("parts"))
                 if output is not None:
                     return output, None
 
-        status_message = (task.get("status") or {}).get("message")
-        if isinstance(status_message, dict):
-            output = _extract_parts(status_message.get("parts"))
-            if output is not None:
-                return output, None
+    status_message = status.get("message") if isinstance(status, dict) else None
 
-    return None, "No structured output could be extracted from the A2A response."
+    if isinstance(status_message, dict):
+        output = _extract_parts(status_message.get("parts"))
+        if output is not None:
+            return output, None
+
+    return None, "Completed A2A task contained no structured output."
+
+
+def extract_a2a_output(validation):
+    if validation.get("status") != "PASS":
+        return None, "A2A response validation failed."
+
+    response = validation.get("response")
+
+    if not isinstance(response, dict):
+        return None, "A2A response was missing."
+
+    result = response.get("result")
+
+    if not isinstance(result, dict):
+        return None, "A2A result was missing."
+
+    message = result.get("message")
+
+    if isinstance(message, dict):
+        output = _extract_parts(message.get("parts"))
+
+        if output is not None:
+            return output, None
+
+        return None, "A2A message contained no structured output."
+
+    task = result.get("task")
+
+    if isinstance(task, dict):
+        return _extract_completed_task(task)
+
+    return None, "A2A response contained neither a message nor a task."
+
+
+async def _execute_a2a_case(
+    client,
+    endpoint,
+    test_case,
+    max_polls=MAX_TASK_POLLS,
+    poll_interval=TASK_POLL_INTERVAL,
+):
+    message_text = json.dumps(
+        test_case.input,
+        ensure_ascii=False,
+        default=str,
+    )
+
+    validation = await send_message(
+        client,
+        endpoint,
+        message_text,
+        allow_private_network=False,
+    )
+
+    if validation.get("status") != "PASS":
+        return _not_run(test_case, "A2A SendMessage validation failed.")
+
+    response = validation.get("response") or {}
+    result = response.get("result") or {}
+
+    if isinstance(result.get("message"), dict):
+        actual, error = extract_a2a_output(validation)
+
+        if error:
+            return _not_run(test_case, error)
+
+        return _score_case(test_case, actual)
+
+    task = result.get("task")
+
+    if not isinstance(task, dict):
+        return _not_run(test_case, "A2A response did not contain a valid task.")
+
+    task_id = task.get("id")
+    status = task.get("status") or {}
+    state = status.get("state")
+
+    if not task_id:
+        return _not_run(test_case, "A2A task did not provide an ID.")
+
+    if state == "TASK_STATE_COMPLETED":
+        actual, error = _extract_completed_task(task)
+
+        if error:
+            return _not_run(test_case, error)
+
+        return _score_case(test_case, actual)
+
+    if state in UNSUPPORTED_STATES:
+        return _not_run(
+            test_case,
+            f"A2A task requires additional interaction. State: {state}",
+        )
+
+    if state not in RUNNING_STATES:
+        return _not_run(
+            test_case,
+            f"A2A task cannot be evaluated. State: {state}",
+        )
+
+    for poll_number in range(1, max_polls + 1):
+        await asyncio.sleep(poll_interval)
+
+        task_validation = await get_task(
+            client,
+            endpoint,
+            task_id,
+            allow_private_network=False,
+        )
+
+        if task_validation.get("status") != "PASS":
+            return _not_run(
+                test_case,
+                "A2A GetTask validation failed.",
+            )
+
+        updated_task = task_validation.get("task")
+        updated_state = task_validation.get("task_state")
+
+        if updated_state == "TASK_STATE_COMPLETED":
+            actual, error = _extract_completed_task(updated_task)
+
+            if error:
+                return _not_run(test_case, error)
+
+            return _score_case(test_case, actual)
+
+        if updated_state in UNSUPPORTED_STATES:
+            return _not_run(
+                test_case,
+                f"A2A task requires additional interaction. State: {updated_state}",
+            )
+
+        if updated_state not in RUNNING_STATES:
+            return _not_run(
+                test_case,
+                f"A2A task ended without successful completion. State: {updated_state}",
+            )
+
+    return _not_run(
+        test_case,
+        f"A2A task timed out after {max_polls} polling attempts.",
+    )
 
 
 def extract_mcp_output(validation):
@@ -99,10 +246,12 @@ def extract_mcp_output(validation):
         return None, "MCP tool requires additional input."
 
     structured = result.get("structuredContent")
+
     if isinstance(structured, (dict, list)):
         return structured, None
 
     content = result.get("content")
+
     if isinstance(content, list):
         for item in content:
             if not isinstance(item, dict):
@@ -110,6 +259,7 @@ def extract_mcp_output(validation):
 
             if item.get("type") == "text":
                 parsed = _parse_structured_output(item.get("text"))
+
                 if parsed is not None:
                     return parsed, None
 
@@ -147,26 +297,12 @@ async def execute_a2a_test_cases(client, endpoint, test_cases):
 
     for test_case in test_cases:
         try:
-            message_text = json.dumps(
-                test_case.input,
-                ensure_ascii=False,
-                default=str,
-            )
-
-            validation = await send_message(
+            result = await _execute_a2a_case(
                 client,
                 endpoint,
-                message_text,
-                allow_private_network=False,
+                test_case,
             )
-
-            actual, error = extract_a2a_output(validation)
-
-            if error:
-                results.append(_not_run(test_case, error))
-                continue
-
-            results.append(_score_case(test_case, actual))
+            results.append(result)
 
         except Exception as error:
             results.append(
