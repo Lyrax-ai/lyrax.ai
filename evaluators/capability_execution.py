@@ -1,5 +1,6 @@
 ﻿import asyncio
 import json
+import time
 from typing import Any
 
 from evaluators.a2a_client import send_message, get_task
@@ -312,6 +313,75 @@ async def execute_a2a_test_cases(client, endpoint, test_cases):
     return _summarize(results)
 
 
+
+MAX_MCP_TASK_POLLS = 10
+DEFAULT_MCP_TASK_POLL_INTERVAL = 1.0
+
+
+def _extract_mcp_result_payload(result):
+    if not isinstance(result, dict):
+        return None, "MCP task returned an invalid result."
+
+    if result.get("isError") is True:
+        return None, "MCP task completed with an execution error."
+
+    structured = result.get("structuredContent")
+    if isinstance(structured, (dict, list)):
+        return structured, None
+
+    content = result.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parsed = _parse_structured_output(item.get("text"))
+                if parsed is not None:
+                    return parsed, None
+
+    return None, "MCP returned no machine-readable structured output."
+
+
+def _poll_mcp_task(client, task, tool_name):
+    task_id = task.get("taskId")
+    if not isinstance(task_id, str) or not task_id:
+        return None, "MCP task handle did not contain a valid task ID."
+
+    for attempt in range(MAX_MCP_TASK_POLLS):
+        status = task.get("status")
+
+        if status == "completed":
+            return _extract_mcp_result_payload(task.get("result"))
+
+        if status in {"failed", "cancelled", "canceled", "rejected"}:
+            return None, f"MCP task ended unsuccessfully. State: {status}"
+
+        if status == "input_required":
+            return None, "MCP task requires additional input."
+
+        if status != "working":
+            return None, f"MCP task returned an unsupported state: {status}"
+
+        if attempt == MAX_MCP_TASK_POLLS - 1:
+            break
+
+        interval_ms = task.get("pollIntervalMs", 1000)
+        if not isinstance(interval_ms, (int, float)) or isinstance(interval_ms, bool):
+            interval_ms = 1000
+
+        time.sleep(max(0.1, min(interval_ms / 1000, 5.0)))
+
+        validation = client.get_task(task_id)
+        if validation.get("status") != "PASS":
+            return None, "MCP task polling response failed validation."
+
+        evidence = validation.get("evidence") or {}
+        task = evidence.get("task")
+
+        if not isinstance(task, dict):
+            return None, "MCP task polling response did not contain task data."
+
+    return None, f"MCP task timed out after {MAX_MCP_TASK_POLLS} polling attempts."
+
+
 def execute_mcp_test_cases(client, test_cases, tool_definitions=None):
     results = []
     tool_definitions = tool_definitions or {}
@@ -319,19 +389,13 @@ def execute_mcp_test_cases(client, test_cases, tool_definitions=None):
     for test_case in test_cases:
         if not test_case.tool_name:
             results.append(
-                _not_run(
-                    test_case,
-                    "MCP test case must declare tool_name.",
-                )
+                _not_run(test_case, "MCP test case must declare tool_name.")
             )
             continue
 
         if not isinstance(test_case.input, dict):
             results.append(
-                _not_run(
-                    test_case,
-                    "MCP tool arguments must be a JSON object.",
-                )
+                _not_run(test_case, "MCP tool arguments must be a JSON object.")
             )
             continue
 
@@ -342,7 +406,25 @@ def execute_mcp_test_cases(client, test_cases, tool_definitions=None):
                 tool_definition=tool_definitions.get(test_case.tool_name),
             )
 
-            actual, error = extract_mcp_output(validation)
+            if validation.get("status") != "PASS":
+                results.append(
+                    _not_run(test_case, "MCP tool-call validation did not pass.")
+                )
+                continue
+
+            evidence = validation.get("evidence") or {}
+            response = evidence.get("response")
+            rpc_result = response.get("result", {}) if isinstance(response, dict) else {}
+
+            if isinstance(rpc_result, dict) and rpc_result.get("resultType") == "task":
+                task = evidence.get("task") or rpc_result.get("task") or rpc_result
+                actual, error = _poll_mcp_task(
+                    client,
+                    task,
+                    test_case.tool_name,
+                )
+            else:
+                actual, error = extract_mcp_output(validation)
 
             if error:
                 results.append(_not_run(test_case, error))

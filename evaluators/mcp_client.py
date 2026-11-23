@@ -171,3 +171,21 @@ class MCPClient:
             request_id,
             tool_definition=tool_definition,
         )
+
+    def get_task(self, task_id: str):
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise ValueError("Task ID must be a non-empty string.")
+
+        request_id, response = self._request(
+            "tasks/get",
+            params={"taskId": task_id},
+            tool_name=task_id,
+        )
+
+        from evaluators.mcp import validate_get_task_response
+
+        return validate_get_task_response(
+            response,
+            request_id,
+            expected_task_id=task_id,
+        )

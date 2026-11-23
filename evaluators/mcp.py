@@ -476,6 +476,31 @@ def validate_tool_call_response(
 
     result_type = result.get("resultType")
 
+    if result_type == "task":
+        task = result.get("task", result)
+        valid = (
+            isinstance(task, dict)
+            and isinstance(task.get("taskId"), str)
+            and bool(task.get("taskId"))
+            and task.get("status") in {
+                "working", "input_required", "completed",
+                "failed", "cancelled"
+            }
+            and isinstance(task.get("createdAt"), str)
+            and isinstance(task.get("lastUpdatedAt"), str)
+            and isinstance(task.get("ttlMs"), int)
+            and not isinstance(task.get("ttlMs"), bool)
+            and task.get("ttlMs") >= 0
+        )
+
+        checks.append(_check(
+            "tool_task",
+            "PASS" if valid else "FAIL",
+            "Valid asynchronous task handle."
+            if valid else "Malformed asynchronous task handle."
+        ))
+        return _result(checks, {"response": response, "task": task})
+
     if result_type == "input_required":
         input_requests = result.get("inputRequests")
 
@@ -623,3 +648,33 @@ def validate_tool_call_response(
                     )
 
     return _result(checks, {"response": response})
+
+
+def validate_get_task_response(
+    response: Any,
+    request_id: str | int,
+    expected_task_id: str,
+) -> dict:
+    checks, result = _validate_rpc_response(response, request_id)
+
+    if result is None:
+        return _result(checks, {"response": response})
+
+    task = result.get("task", result)
+    valid = (
+        isinstance(task, dict)
+        and task.get("taskId") == expected_task_id
+        and task.get("status") in {
+            "working", "input_required", "completed",
+            "failed", "cancelled"
+        }
+    )
+
+    checks.append(_check(
+        "task_response",
+        "PASS" if valid else "FAIL",
+        "Valid task status response."
+        if valid else "Invalid task response or task ID mismatch."
+    ))
+
+    return _result(checks, {"response": response, "task": task})

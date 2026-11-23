@@ -123,3 +123,150 @@ async def test_a2a_input_required_returns_not_run(monkeypatch):
     assert result["status"] == "NOT_RUN"
     assert "additional interaction" in result["test_cases"][0]["reason"]
 
+
+def make_mcp_case():
+    return EvaluationTestCase(
+        id="mcp-001",
+        name="Extract answer",
+        capability="structured_data_extraction",
+        input={"question": "What is the answer?"},
+        expected_output={"answer": 42},
+        tool_name="answer",
+    )
+
+
+class FakeMCPClient:
+    def __init__(self, initial_task, polled_tasks):
+        self.initial_task = initial_task
+        self.polled_tasks = list(polled_tasks)
+        self.poll_count = 0
+
+    def call_tool(self, *args, **kwargs):
+        task = self.initial_task
+        return {
+            "status": "PASS",
+            "evidence": {
+                "response": {
+                    "result": {
+                        "resultType": "task",
+                        "task": task,
+                    }
+                },
+                "task": task,
+            },
+        }
+
+    def get_task(self, task_id):
+        self.poll_count += 1
+        task = (
+            self.polled_tasks.pop(0)
+            if self.polled_tasks
+            else {
+                "taskId": task_id,
+                "status": "working",
+                "pollIntervalMs": 100,
+            }
+        )
+        return {
+            "status": "PASS",
+            "evidence": {"task": task},
+        }
+
+
+def test_mcp_task_completes_successfully(monkeypatch):
+    monkeypatch.setattr(execution.time, "sleep", lambda *_: None)
+
+    client = FakeMCPClient(
+        {
+            "taskId": "task-1",
+            "status": "working",
+            "pollIntervalMs": 100,
+        },
+        [
+            {
+                "taskId": "task-1",
+                "status": "completed",
+                "result": {
+                    "structuredContent": {"answer": 42},
+                },
+            }
+        ],
+    )
+
+    result = execution.execute_mcp_test_cases(
+        client, [make_mcp_case()]
+    )
+
+    assert result["status"] == "PASS"
+    assert result["passed"] == 1
+    assert result["test_cases"][0]["accuracy"] == 100
+    assert client.poll_count == 1
+
+
+def test_mcp_task_failure_returns_not_run(monkeypatch):
+    monkeypatch.setattr(execution.time, "sleep", lambda *_: None)
+
+    client = FakeMCPClient(
+        {
+            "taskId": "task-2",
+            "status": "working",
+        },
+        [
+            {
+                "taskId": "task-2",
+                "status": "failed",
+            }
+        ],
+    )
+
+    result = execution.execute_mcp_test_cases(
+        client, [make_mcp_case()]
+    )
+
+    assert result["status"] == "NOT_RUN"
+    assert "unsuccessfully" in result["test_cases"][0]["reason"]
+
+
+def test_mcp_task_timeout_returns_not_run(monkeypatch):
+    monkeypatch.setattr(execution.time, "sleep", lambda *_: None)
+
+    client = FakeMCPClient(
+        {
+            "taskId": "task-3",
+            "status": "working",
+            "pollIntervalMs": 100,
+        },
+        [],
+    )
+
+    result = execution.execute_mcp_test_cases(
+        client, [make_mcp_case()]
+    )
+
+    assert result["status"] == "NOT_RUN"
+    assert "timed out" in result["test_cases"][0]["reason"]
+    assert client.poll_count == execution.MAX_MCP_TASK_POLLS - 1
+
+
+def test_mcp_task_input_required_returns_not_run(monkeypatch):
+    monkeypatch.setattr(execution.time, "sleep", lambda *_: None)
+
+    client = FakeMCPClient(
+        {
+            "taskId": "task-4",
+            "status": "working",
+        },
+        [
+            {
+                "taskId": "task-4",
+                "status": "input_required",
+            }
+        ],
+    )
+
+    result = execution.execute_mcp_test_cases(
+        client, [make_mcp_case()]
+    )
+
+    assert result["status"] == "NOT_RUN"
+    assert "additional input" in result["test_cases"][0]["reason"]
